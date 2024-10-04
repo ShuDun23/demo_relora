@@ -5,6 +5,7 @@ Based on: https://github.com/conceptofmind/PaLM/blob/main/palm/build_dataloaders
 Usage:
     python build_dataloaders.py --tokenizer EleutherAI/gpt-neox-20b --dataset openwebtext --text_field text --sequence_length 2048
 """
+# 下载并预处理一个Hugging Face数据集，然后使用指定的分词器(tokenizer)进行分词和切分，最后将pre-processed dataset保存到磁盘
 import os
 import time
 import json

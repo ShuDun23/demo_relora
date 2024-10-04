@@ -1,13 +1,17 @@
 """
 Distributed training code for ReLoRA.
+分布式训练脚本 调用relora.py中的 ReLoRaModel和 ReLoRaLinear来实现relora技术
+包含了用于分布式训练的参数解析、模型评估、模型保存、数据集加载和训练循环的代码。
+使用了PyTorch的分布式训练功能，如 DistributedDataParallel 和 ZeroRedundancyOptimizer
+分布式训练就是在多个GPU上训练，进而需要在多个GPU之间更新和同步数据
 """
 import os
 import sys
 import yaml
 import time
 import json
-import random
-import argparse
+import random # 以上为标准库
+import argparse #  常用库 用来定义和解析命令行参数 也可以用 optparse, click库
 from typing import Union
 
 import numpy as np
@@ -15,7 +19,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.utils.data
-import torch.distributed as dist
+import torch.distributed as dist # 分布式训练的库
 from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
@@ -33,11 +37,11 @@ from transformers import (
 from tokenizers import Tokenizer
 
 import datasets
-import datasets.distributed
-import wandb
+import datasets.distributed # 分布式数据加载
+import wandb # 用于跟踪实验
 
 from tqdm import tqdm
-from loguru import logger
+from loguru import logger # 记录日志的库
 
 from peft_pretraining import training_utils, args_utils
 from peft_pretraining.dataloader import SkipDataLoader
@@ -51,7 +55,7 @@ from peft_pretraining.megatron_dataset import data_utils as megatron_data_utils
 transformers.logging.set_verbosity_error()
 
 
-def parse_args(args=None):
+def parse_args(args=None): # 用argparse库定义了一堆命令行参数
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--training_config", type=str, default=None,
@@ -104,7 +108,7 @@ def parse_args(args=None):
     parser.add_argument("--warmup_steps", type=int, default=1_000)
     parser.add_argument("--clip_grad_norm", type=float, default=1.0)
 
-    parser.add_argument("--eval_every", type=int, default=1_000)
+    parser.add_argument("--eval_every", type=int, default=1_000) # evaluation
 
     parser.add_argument("--num_training_steps", type=int, default=10_000,
                         help="Number of **update steps** to train for. "
@@ -140,17 +144,22 @@ def parse_args(args=None):
     return args
 
 
-@torch.no_grad()
+@torch.no_grad() # 用评估数据集进行模型评估
+
 def evaluate_model(model: nn.Module, eval_dataloader, device, target_eval_tokens=10_000_000):
     _time = time.time()
     was_training = model.train
-    model.eval()
+    model.eval() # 将模型设置为评估模式，这会关闭 dropout和 batch normalization等仅在训练时使用的层
 
-    ddp_loss_info = torch.zeros(3).to(device)  # [loss, n_batches, n_tokens]
+    """
+    初始化一个用于 累积损失和 统计信息的张量
+    tensor可以在GPU上加速 而list只能在CPU上运行
+    """
+    ddp_loss_info = torch.zeros(3).to(device)  # [loss, n_batches, n_tokens] 这并不是list, 而是一个PyTorch tensor
     tokens_in_batch_info = torch.zeros(1).to(device)
-
+    
     rank = dist.get_rank()
-    for i, batch in enumerate(eval_dataloader):
+    for i, batch in enumerate(eval_dataloader): # 使用enumerate遍历评估数据加载器中的批次
         if i == 0:
             # this way of estiming the number of eval steps
             # is needed to avoid a deadlock when using FSDP
@@ -163,33 +172,34 @@ def evaluate_model(model: nn.Module, eval_dataloader, device, target_eval_tokens
 
         batch = {k: v.to(device) for k, v in batch.items()}
 
-        loss = model(**batch, labels=batch["input_ids"]).loss
+        loss = model(**batch, labels=batch["input_ids"]).loss # 将批次数据移动到正确的设备上，并计算损失(包含feedforward和计算loss)
         if torch.isnan(ddp_loss_info[0]):
             print(f"Rank {dist.get_rank()} got nan loss. This is probably a bug.")
 
         tokens_in_batch = batch["input_ids"].numel()
         assert tokens_in_batch > 0, "Batch size is zero"
-        ddp_loss_info[0] += loss.detach()
-        ddp_loss_info[1] += 1
-        ddp_loss_info[2] += tokens_in_batch
+        ddp_loss_info[0] += loss.detach() # 将当前批次的损失加到总累积损失中
+        ddp_loss_info[1] += 1 # 更新批次数
+        ddp_loss_info[2] += tokens_in_batch # 更新处理过的总tokens数
 
     # check if loss is nan
     if torch.isnan(ddp_loss_info[0]):
         raise RuntimeError(f"Rank {rank} got nan loss. This is probably a bug.")
 
     # Gather losses across all GPUs
-    dist.all_reduce(ddp_loss_info, op=dist.ReduceOp.SUM)
-    eval_loss = ddp_loss_info[0] / ddp_loss_info[1]
-    evaluated_on_tokens = ddp_loss_info[2].item()
-    logger.info(f"Evaluated on {evaluated_on_tokens} tokens, eval loss: {eval_loss:.4f}")
+    dist.all_reduce(ddp_loss_info, op=dist.ReduceOp.SUM) # 所有GPU间累加ddp_loss_info 其中包含[1] [2] [3]
+    eval_loss = ddp_loss_info[0] / ddp_loss_info[1] # 计算平均损失 总损失除以更新batch数
+    evaluated_on_tokens = ddp_loss_info[2].item() 
+    logger.info(f"Evaluated on {evaluated_on_tokens} tokens, eval loss: {eval_loss:.4f}") # 用日志记录器logger记录所用的时间和loss
 
     logger.info(f"Evaluation took {time.time() - _time:.2f} seconds")
 
-    if was_training: model.train()
+    if was_training: model.train() # 从eval模式切回train模式
     return eval_loss, evaluated_on_tokens
 
-
-def save_model_ddp(model, optimizer, scheduler, training_state_checkpoint, run_config, save_dir):
+# 保存模型 save_model_ddp和 save_model_fsdp函数用于在分布式数据并行（DDP）和全参数分片数据并行（FSDP）设置中保存模型
+# Distributed Data Parallel DDP
+def save_model_ddp(model, optimizer, scheduler, training_state_checkpoint, run_config, save_dir): # 分布式数据并行(DDP)下保存
     global_rank = dist.get_rank()
     _time = time.time()
 
@@ -197,17 +207,17 @@ def save_model_ddp(model, optimizer, scheduler, training_state_checkpoint, run_c
         update_step = training_state_checkpoint["update_step"]
         os.makedirs(os.path.dirname(save_dir), exist_ok=True)
 
-        _model = model.module
-        _model.save_pretrained(save_dir)
+        _model = model.module # 获取DDP包装器内部的原始模型
+        _model.save_pretrained(save_dir) # 保存
 
     dist.barrier()
     if isinstance(optimizer, ZeroRedundancyOptimizer):
         logger.info("Started consolidating optimizer state dict")
-        optimizer.consolidate_state_dict()
-        logger.info(f"Consolidating optimizer state dict took {time.time() - _time:.2f} seconds")
+        optimizer.consolidate_state_dict() # 整合分布式存储的优化器状态
+        logger.info(f"Consolidating optimizer state dict took {time.time() - _time:.2f} seconds") # 
 
     if global_rank == 0:
-        optimizer_checkpoint = {
+        optimizer_checkpoint = { # checkpoint检查点 有点像保存断点状态 下次可以从断点处恢复训练
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
             "update_step": update_step,
@@ -219,12 +229,14 @@ def save_model_ddp(model, optimizer, scheduler, training_state_checkpoint, run_c
 
         training_state_checkpoint["wandb_id"] = wandb.run.id
         with open(f"{save_dir}/training_state.json", "w") as f:
-            json.dump(training_state_checkpoint, f, indent=4)
+            json.dump(training_state_checkpoint, f, indent=4) # 将训练状态写入一个JSON文件，以便可以从中断的地方恢复训练
 
-    logger.info(f"Saving took {time.time() - _time:.2f} seconds")
-    dist.barrier()
+    logger.info(f"Saving took {time.time() - _time:.2f} seconds") # 记录保存花费的时间
+    dist.barrier() # 确保所有的进程在继续执行之前都已经完成了模型和状态的保存
 
-def save_model_fsdp(model, optimizer, scheduler, training_state_checkpoint, run_config, save_dir):
+# Fully Sharded Data Parallel FSDP
+# FSDP通过将模型参数分片到各个GPU上，可以有效地减少每个GPU上的内存占用，这对于大型模型特别有用。DDP则通常在每个GPU上保存完整的模型参数
+def save_model_fsdp(model, optimizer, scheduler, training_state_checkpoint, run_config, save_dir): # 在全参数分片数据并行(FSDP)设置下保存
     raise RuntimeError("FSDP is not supported anymore. There were a lot of isses with ReLoRA and FSDP and no speed or memory improvements.")
     with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT):
         global_rank = dist.get_rank()
@@ -252,7 +264,7 @@ def save_model_fsdp(model, optimizer, scheduler, training_state_checkpoint, run_
             with open(f"{save_dir}/training_state.json", "w") as f:
                 json.dump(training_state_checkpoint, f, indent=4)
 
-
+# save_model 函数根据分布式类型选择 save_model_ddp 或 save_model_fsdp
 def save_model(model, *, optimizer, scheduler, training_state_checkpoint, run_config, distributed_type, save_dir):
     """
     Args:
@@ -273,11 +285,13 @@ def save_model(model, *, optimizer, scheduler, training_state_checkpoint, run_co
         raise ValueError(f"Unknown distributed type {distributed_type}")
 
 
-def load_megatron_dataset(args, world_size, start_iteration):
+# 加载megatron数据集 Megatron是一个用于训练多亿参数的神经网络模型的库
+def load_megatron_dataset(args, world_size, start_iteration): 
     logger.info(f"Loading Megatron dataset arguments from {args.megatron_dataset_config}")
     with open(args.megatron_dataset_config) as f:
-        dataset_config_yaml = yaml.safe_load(f)
+        dataset_config_yaml = yaml.safe_load(f) # 加载Megatron数据集配置文件
 
+    # 更新配置参数
     dataset_config_yaml["global_num_gpus"] = world_size
     dataset_config_yaml["train_micro_batch_size_per_gpu"] = args.batch_size
     dataset_config_yaml["gradient_accumulation_steps"] = args.gradient_accumulation
@@ -294,8 +308,10 @@ def load_megatron_dataset(args, world_size, start_iteration):
         logger.error(f"num_training_steps ({args.num_training_steps}) is greater than train_iters ({dataset_config_yaml['train_iters']})")
         raise ValueError("num_training_steps must be less than train_iters")
 
+    # 设置tokenizer 把文本转化成更小的单元(token)
     tokenizer = Tokenizer.from_file(dataset_config_yaml["vocab_file"])
 
+    # 打印配置信息
     logger.info("*" * 40)
     logger.info("Dataset arguments:")
     for k, v in dataset_config_yaml.items():
@@ -313,34 +329,36 @@ def load_megatron_dataset(args, world_size, start_iteration):
         raise ValueError("megatron_dataset_args.train_batch_size must match total_batch_size")
 
     train_loader, eval_loader, test_loader = megatron_data_utils.\
-        build_train_valid_test_dataloaders(neox_args=dataset_args)
+        build_train_valid_test_dataloaders(neox_args=dataset_args) # 加载数据集
     logger.info("Megatron dataset built")
     tokenizer.name_or_path = dataset_config_yaml["vocab_file"]
     return train_loader, eval_loader, test_loader, tokenizer
 
-
-def maybe_make_profiler(args):
+# 创建和启动一个性能分析器 profiler 这个性能分析器可以帮助开发者了解模型训练过程中的性能瓶颈和资源使用情况
+def maybe_make_profiler(args): 
     if not args.profile: return None
     global_rank = dist.get_rank()
-    profiler_logging_dir = os.path.join(f"profiler_logs/{args.run_name}")
+    profiler_logging_dir = os.path.join(f"profiler_logs/{args.run_name}") # 构建一个目录
     prof = torch.profiler.profile(
         schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
         on_trace_ready=torch.profiler.tensorboard_trace_handler(profiler_logging_dir, worker_name=f"rank{global_rank}"),
-        record_shapes=True,
-        profile_memory=True,
-        with_stack=True,
+        record_shapes=True, # 记录操作的输入和输出形状
+        profile_memory=True, # 启用内存使用情况的分析
+        with_stack=True, # 启用Python栈跟踪记录
     )
     print(f"Rank {global_rank} profiling results will be saved to {profiler_logging_dir}")
-    prof.start()
+    prof.start() # 启动性能分析器
     return prof
 
+# 设置训练环境、加载数据集、初始化模型、配置优化器和学习率调度器、执行训练循环，并在训练过程中保存模型和训练状态
+def main(args): # args = parse_args()
 
-def main(args):
-    # seed all
+    # seed all 设置随机种子 确保可重复性
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
 
+    # 获取环境变量和分布式环境初始化
     assert "LOCAL_RANK" in os.environ, "torchrun should set LOCAL_RANK"
     global_rank = int(os.environ['RANK'])
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -401,6 +419,7 @@ def main(args):
     dist.barrier()  # guarantees none of the workers will read save_dir above here before it's created by rank 0
 
     # initialize wandb without config (it is passed later)
+    # Weights & Biases (wandb)
     if global_rank == 0:
         wandb.init(project="peft_pretraining", tags=args.tags, id=wandb_id, resume="allow", notes=args.comment)
         args.run_name = wandb.run.name
@@ -474,6 +493,7 @@ def main(args):
         train_loader, eval_loader, test_loader, tokenizer = load_megatron_dataset(args, world_size=world_size, start_iteration=start_iteration)
         dataset_preprocessing_args = {"tokenizer": tokenizer.name_or_path}
 
+    # 模型初始化
     if args.model_config is not None:
         model_config = AutoConfig.from_pretrained(args.model_config)
         t_vocab_size = tokenizer.get_vocab_size() if isinstance(tokenizer, Tokenizer) else tokenizer.vocab_size
@@ -528,6 +548,7 @@ def main(args):
 
     params_before = sum(p.numel() for p in model.parameters())
 
+    # 在指定的线性层上应用ReLoRA
     if args.use_peft:
         need_linear_weight = (
             args.relora is not None
@@ -552,6 +573,7 @@ def main(args):
             use_double_quant=args.use_double_quant,
         )
 
+    # 加载pre-trained model和训练状态
     if args.resume_from:
         logger.info(f"Loading model from {args.resume_from}")
         checkpoint_path = os.path.join(args.resume_from, "pytorch_model.bin")
@@ -605,7 +627,7 @@ def main(args):
     p_trainable_params = n_trainable_params / n_total_params
 
     # ##############################
-    # Distributed wrapping
+    # Distributed wrapping 根据分布式类型(DDP or FSDP)分布式包装
     if args.distributed_type == "fsdp":
         logger.info("Wrapping model with FSDP")
         raise RuntimeError("FSDP is not supported anymore. "
@@ -655,6 +677,7 @@ def main(args):
         wandb.config.update(run_config, allow_val_change=True)
         wandb.save(os.path.abspath(__file__), policy="now") # save current script
 
+    # 配置optimizer 和 lr
     optimizer_state_keys = None
     optimizer_kwargs = {
         "lr": args.lr,
@@ -753,7 +776,7 @@ def main(args):
     n_skipped_batches = 0
 
     # ##############################
-    # TRAINING LOOP
+    # TRAINING LOOP 包括 前向传播、损失计算、反向传播和参数更新
     # we assert above that the dataset is large enough to train for num_training_steps, so no need for epochs
     # ##############################
 
@@ -783,7 +806,7 @@ def main(args):
         batch = {k: v.to(device) for k, v in batch.items()}
         tokens_seen += batch["input_ids"].numel() * world_size
 
-        loss = model(**batch, labels=batch["input_ids"]).loss
+        loss = model(**batch, labels=batch["input_ids"]).loss # forward 并 计算loss
 
         loss_info[0] += loss.detach()
         loss_info[1] += 1
@@ -794,15 +817,15 @@ def main(args):
             wandb.log({"loss": loss.item(), "update_step": 0}, step=0)
 
         scaled_loss = loss / args.gradient_accumulation
-        scaled_loss.backward()
+        scaled_loss.backward() # backward 计算loss对参数的梯度
 
-        if global_step % args.gradient_accumulation != 0:
+        if global_step % args.gradient_accumulation != 0: # 如果用了梯度累积 则累积梯度
             continue
 
         # The below code is only executed during the update step
         if global_rank == 0: pbar.update(1)
 
-        if args.clip_grad_norm > 0:
+        if args.clip_grad_norm > 0: # 如果设置了梯度剪裁 则进行gradient clip以防止梯度爆炸
             grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, args.clip_grad_norm, error_if_nonfinite=True)
             if global_rank == 0:
                 wandb.log({"grad_norm": grad_norm.item()}, step=global_step)
@@ -811,8 +834,8 @@ def main(args):
         _loss = loss_info[0] / loss_info[1]  # loss to log in wandb below
 
         if loss_info[2] == 0:  # no NaNs, update model
-            optimizer.step()
-            scheduler.step()
+            optimizer.step() # 参数更新
+            scheduler.step() # 更新学习率
         else:
             logger.error(f"Nan detected in loss_info, {_loss=}, skipping update")
             n_skipped_batches += 1
@@ -821,12 +844,13 @@ def main(args):
                 logger.error(f"More than 5% of batches skipped due to NaNs, stopping training.")
                 break
 
-        optimizer.zero_grad()
+        optimizer.zero_grad() # 梯度归零
         update_step += 1
         update_time = time.time() - update_time
 
         loss_info = torch.zeros_like(loss_info)
 
+        # 保存model 和 训练状态
         if local_step > args.gradient_accumulation and update_step % args.save_every == 0:
             current_model_directory = f"{args.save_dir}/model_{update_step}"
             logger.info(f"Saving model and optimizer to {current_model_directory}, update step {update_step}")
@@ -883,9 +907,9 @@ def main(args):
             n_lora_restarts += 1
 
             if args.distributed_type == "ddp":
-                model.module.merge_and_reinit()
+                model.module.merge_and_reinit() # ddp时用merge_and_reinit()
             elif args.distributed_type == "fsdp":
-                model.apply(merge_and_reinit_functional)
+                model.apply(merge_and_reinit_functional) # fsdp时用merge_and_reinit_functional
             else:
                 raise ValueError(f"Unknown distributed type {args.distributed_type}")
             
@@ -974,7 +998,7 @@ def main(args):
             save_dir=current_model_directory,
         )
 
-    # Final evaluation
+    # Final evaluation 最终评估
     logger.info("Running final evaluation")
     model.eval()
     del loss, optimizer, scheduler
@@ -1012,12 +1036,12 @@ def main(args):
             logger.info(f"Test loss: {total_loss}")
 
     if global_rank == 0:
-        wandb.finish()
+        wandb.finish() # 结束
 
     logger.info("Script finished successfully")
     print(f"Rank {global_rank} finished successfully")
 
 
-if __name__ == "__main__":
+if __name__ == "__main__": 
     args = parse_args()
     main(args)
