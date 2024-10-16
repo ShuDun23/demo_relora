@@ -7,25 +7,43 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import bitsandbytes as bnb
-import bitsandbytes.functional as bnbF
+# import bitsandbytes as bnb
+# import bitsandbytes.functional as bnbF
 
 from transformers import AutoModelForCausalLM, AutoConfig
 
 from loguru import logger # 使用loguru库来记录日志，这对于调试和监控模型训练过程非常有用
 
+def scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False):
+    L, S = query.size(-2), key.size(-2)
+    scale_factor = 1 / math.sqrt(query.size(-1))
+    attn_weight = query @ key.transpose(-2, -1) * scale_factor
+    if is_causal:
+        causal_mask = torch.triu(torch.ones(L, S, dtype=torch.bool, device=query.device), diagonal=1)
+        attn_weight.masked_fill_(causal_mask, float('-inf'))
+    if attn_mask is not None:
+        attn_weight += attn_mask
+    attn_weight = F.softmax(attn_weight, dim=-1)
+    if dropout_p > 0.0:
+        attn_weight = F.dropout(attn_weight, p=dropout_p)
+    return attn_weight @ value
+
+# 将自定义函数添加到 torch.nn.functional 模块
+if not hasattr(F, 'scaled_dot_product_attention'):
+    F.scaled_dot_product_attention = scaled_dot_product_attention
+
 # 定义ReLoRaConfig类，ReLoRa的配置
 @dataclass # python里的一个装饰器，用于简化类的定义 有了它不用写init self等 @用于定义装饰器
 class ReLoRaConfig: # 这是一个数据类
     r: int
-    lora_alpha: int 
+    lora_alpha: int
     lora_dropout: float
     target_modules: List[str]
     keep_original_weights: bool
     lora_only: bool = False
     trainable_scaling: bool = False
-    quantize: str = None
-    use_double_quant: bool = False
+    # quantize: str = None
+    # use_double_quant: bool = False
 
 # 单独又定义了一个merge_and_reinit函数
 def merge_and_reinit_functional(module): # restart
@@ -72,8 +90,8 @@ class ReLoRaModel(torch.nn.Module):
         keep_original_weights=True,
         lora_only=False,
         trainable_scaling=False, # ??
-        quantize=None,
-        use_double_quant=False,
+        # quantize=None,
+        # use_double_quant=False,
     ):
         if r <= 0:
             raise ValueError("r must be positive. If you want r == 0, use the original model.")
@@ -96,8 +114,8 @@ class ReLoRaModel(torch.nn.Module):
             lora_dropout=lora_dropout,
             target_modules=target_modules,
             keep_original_weights=keep_original_weights,
-            quantize=quantize,
-            use_double_quant=use_double_quant,
+            # quantize=quantize,
+            # use_double_quant=use_double_quant,
         )
 
         # patch methods
@@ -132,7 +150,7 @@ class ReLoRaModel(torch.nn.Module):
                 quantize=quantize,
                 weight_data=weight_data,
                 bias_data=bias_data,
-                bnb_4bit_use_double_quant=use_double_quant,
+                # bnb_4bit_use_double_quant=use_double_quant,
             )
             if self.keep_original_weights:
                 # make lora'ed network to be exacty the same as the original network at initialization
@@ -169,7 +187,7 @@ class ReLoRaModel(torch.nn.Module):
     def save_pretrained(self, path): # 保存pretrained model及其配置
         self.wrapped_model.save_pretrained(path) # 保存pretrained model
         with open(os.path.join(path, "relora_config.json"), "w") as f: # 打开‘relora_config.json’ as f
-            json.dump(self._config.__dict__, f, indent=4) # 将 self._config 对象的属性（以字典形式）写入f。
+            json.dump(self._config.__dict__, f, indent=4) # 将 self._config 对象的属性���以字典形式）写入f。
             # indent=4 指定了 JSON 文件的缩进格式，使其更易于阅读。
 
     @classmethod
@@ -218,9 +236,9 @@ class ReLoRaLinear(nn.Module): # 定义一个ReLoRa线性层
         bias=True,
         device=None,
         dtype=None,
-        quantize=False,
-        bnb_4bit_use_double_quant=False,
-        bnb_4bit_quant_type="nf4",
+        # quantize=False,
+        # bnb_4bit_use_double_quant=False,
+        # bnb_4bit_quant_type="nf4",
     ):
         """Wraps linear layer x W into x W + x W_a @ W_b * lora_alpha / r
         
@@ -243,25 +261,32 @@ class ReLoRaLinear(nn.Module): # 定义一个ReLoRa线性层
                 # note that our trainable weight are W_a and W_b
                 weight_data = torch.zeros(out_features, in_features, device=device, dtype=dtype, requires_grad=False)
 
-            if quantize is None: # 支持权重量化，这有助于减少模型的大小和计算需求，特别是在部署到资源受限的设备上时
-                self.weight = nn.Parameter(weight_data, requires_grad=False)
-                # 如果 quantize 为 None，则使用标准的 PyTorch 权重参数，nn.Parameter 创建一个不可训练(Frozen)的权重（requires_grad=False）
-            elif quantize == "4bit":
-                self.weight = bnb.nn.Params4bit(
-                    weight_data,
-                    requires_grad=False,
-                    compress_statistics=bnb_4bit_use_double_quant,
-                    quant_type=bnb_4bit_quant_type,
-                ) # 使用 bnb.nn.Params4bit 来创建一个 4 位量化的权重参数
-            elif quantize == "8bit":
-                logger.warning("Int8 currently does not support merge_and_reinit! It will fail")
-                self.weight = bnb.nn.Int8Params(
-                    weight_data,
-                    requires_grad=False,
-                ) # 发出警告，说明当前的 Int8 不支持 merge_and_reinit 操作
-            else:
-                raise ValueError(f"Unknown quantize type: {quantize}")
-                # 如果没定义权重量化类型 则报错
+            # if quantize is None:
+            #     # 如果不进行量化，使用标准的PyTorch权重参数
+            #     # nn.Parameter创建一个不可训练的权重（requires_grad=False）
+            #     # 这是为了保持原始模型权重不变，只通过LoRA进行微调
+            #     self.weight = nn.Parameter(weight_data, requires_grad=False)
+            # elif quantize == "4bit":
+            #     # 使用4位量化来减少模型大小和内存占用
+            #     # bnb.nn.Params4bit是bitsandbytes库提供的4位量化参数类
+            #     self.weight = bnb.nn.Params4bit(
+            #         weight_data,
+            #         requires_grad=False,  # 设置为不可训练
+            #         compress_statistics=bnb_4bit_use_double_quant,  # 是否使用双重量化来进一步压缩统计信息
+            #         quant_type=bnb_4bit_quant_type,  # 指定量化类型，例如"nf4"（normalized float 4）
+            #     )
+            # elif quantize == "8bit":
+            #     # 8位��化，虽然精度比4位���，但仍然可以显著减少模型大小
+            #     # 警告用户当前的Int8实现不支持merge_and_reinit操作
+            #     logger.warning("Int8当前不支持merge_and_reinit操作！这将导致失败")
+            #     self.weight = bnb.nn.Int8Params(
+            #         weight_data,
+            #         requires_grad=False,  # 设置为不可训练
+            #     )
+            # else:
+            #     raise ValueError(f"Unknown quantize type: {quantize}")
+            #     # 如果没定义权重量化类型 则报错
+            self.weight = nn.Parameter(weight_data, requires_grad=False)
 
         self.in_features = in_features
         self.out_features = out_features
@@ -303,33 +328,34 @@ class ReLoRaLinear(nn.Module): # 定义一个ReLoRa线性层
             print("WARNING: Skipping merge and reinit, because only lora parameters are used")
             return
 
-        if not self.quantize:
-            self.weight.data += self.lora_B.weight @ self.lora_A.weight * self._post_lora_scale() # merge
-        elif self.quantize == "4bit":
-            self.weight: bnb.nn.Params4bit
-            _weight_fp = torch.empty(self.weight.data.shape, dtype=self.lora_B.weight.dtype, device=self.weight.data.device)
-            bnbF.dequantize_4bit(self.weight.data, self.weight.quant_state, out=_weight_fp)
-            _weight_fp += self.lora_B.weight @ self.lora_A.weight * self._post_lora_scale() # merge
-            self.weight.data, self.weight.quant_state = bnbF.quantize_4bit(
-                _weight_fp,
-                quant_type=self.weight.quant_type,
-                compress_statistics=self.weight.compress_statistics,
-            )
-            del _weight_fp
-        elif self.quantize == "8bit":
-            self.weight: bnb.nn.Int8Params
-            _weight_fp = torch.empty(self.weight.data.shape, dtype=torch.bfloat16, device=self.weight.data.device)
-            # !out assigned inplace
-            bnbF.dequantize_blockwise(self.weight.data, self.self.lora_B.weight.dtype, out=_weight_fp)
-            _weight_fp += self.lora_B.weight @ self.lora_A.weight * self._post_lora_scale() # merge
-            self.weight.data, self.weight.quant_state = bnbF.quantize_blockwise(
-                _weight_fp,
-                self.weight.quant_state,
-                out=self.weight.data,
-            )
-            del _weight_fp
-        else:
-            raise ValueError(f"Unknown quantize type: {self.quantize}")
+        # if not self.quantize:
+        #     self.weight.data += self.lora_B.weight @ self.lora_A.weight * self._post_lora_scale() # merge
+        # elif self.quantize == "4bit":
+        #     self.weight: bnb.nn.Params4bit # 这里定义了self.weight的类型为 bnb.nn.Params4bit
+        #     _weight_fp = torch.empty(self.weight.data.shape, dtype=self.lora_B.weight.dtype, device=self.weight.data.device)
+        #     bnbF.dequantize_4bit(self.weight.data, self.weight.quant_state, out=_weight_fp)
+        #     _weight_fp += self.lora_B.weight @ self.lora_A.weight * self._post_lora_scale() # merge
+        #     self.weight.data, self.weight.quant_state = bnbF.quantize_4bit(
+        #         _weight_fp,
+        #         quant_type=self.weight.quant_type,
+        #         compress_statistics=self.weight.compress_statistics,
+        #     )
+        #     del _weight_fp
+        # elif self.quantize == "8bit":
+        #     self.weight: bnb.nn.Int8Params # 这里定义了self.weight的类型为 bnb.nn.Int8Params
+        #     _weight_fp = torch.empty(self.weight.data.shape, dtype=torch.bfloat16, device=self.weight.data.device)
+        #     # !out assigned inplace
+        #     bnbF.dequantize_blockwise(self.weight.data, self.self.lora_B.weight.dtype, out=_weight_fp)
+        #     _weight_fp += self.lora_B.weight @ self.lora_A.weight * self._post_lora_scale() # merge
+        #     self.weight.data, self.weight.quant_state = bnbF.quantize_blockwise(
+        #         _weight_fp,
+        #         self.weight.quant_state,
+        #         out=self.weight.data,
+        #     )
+        #     del _weight_fp
+        # else:
+        #     raise ValueError(f"Unknown quantize type: {self.quantize}")
+        self.weight.data += self.lora_B.weight @ self.lora_A.weight * self._post_lora_scale() # merge
 
         nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5)) # reinit A
 
@@ -342,15 +368,16 @@ class ReLoRaLinear(nn.Module): # 定义一个ReLoRa线性层
             # just lora
             return self.lora_B(self.lora_A(self.lora_dropout(x))) * self._post_lora_scale() 
 
-        #以下三个result是传统线性层的输出
-        if self.quantize == "4bit":
-            result = bnb.matmul_4bit(x, self.weight.t(), bias=self.bias, quant_state=self.weight.quant_state)
-        elif self.quantize == "8bit":
-            result = bnb.matmul(x, self.weight.t(), bias=self.bias, quant_state=self.weight.quant_state) # matmul 是 PyTorch 中的一个函数，用于执行矩阵乘法。
-            # x乘以self.weight.t()，然后加上偏置self.bias
-        else:
-            result = F.linear(x, self.weight, bias=self.bias) # F.linear 是 PyTorch 中的一个函数，用于执行线性变换，
-            # 即 y = xA^T + b，其中 x 是输入张量，A 是权重张量，b 是偏置张量。
+        # #以下三个result是传统线性层的输出
+        # if self.quantize == "4bit":
+        #     result = bnb.matmul_4bit(x, self.weight.t(), bias=self.bias, quant_state=self.weight.quant_state)
+        # elif self.quantize == "8bit":
+        #     result = bnb.matmul(x, self.weight.t(), bias=self.bias, quant_state=self.weight.quant_state) # matmul 是 PyTorch 中的一个函数，用于执行矩阵乘法。
+        #     # x乘以self.weight.t()，然后加上偏置self.bias
+        # else:
+        #     result = F.linear(x, self.weight, bias=self.bias) # F.linear 是 PyTorch 中的一个函数，用于执行线性变换，
+        #     # 即 y = xA^T + b，其中 x 是输入张量，A 是权重张量，b 是偏置张量。
+        result = F.linear(x, self.weight, bias=self.bias)
 
         # 如果rank>0则把x经过loraA线性层和loraB线性层的结果加到result(传统线性层输出)上
         if self.r > 0:

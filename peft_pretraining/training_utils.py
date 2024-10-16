@@ -1,7 +1,7 @@
 import os
 import json
 import math
-from functools import partial
+from functools import partial #创建一个分段函数
 
 import torch
 import torch.distributed as dist
@@ -135,7 +135,7 @@ def get_cosine_schedule_with_multiple_warmups(
     if num_training_steps % restart_every != 0:
         raise ValueError(f"num_training_steps ({num_training_steps}) must be divisible by restart_every ({restart_every})")
 
-    lr_lambda = partial(
+    lr_lambda = partial( 
         _get_cosine_schedule_with_multiple_warmups_lambda,
         num_training_steps=num_training_steps,
         first_warmup_steps=first_warmup_steps,
@@ -143,7 +143,7 @@ def get_cosine_schedule_with_multiple_warmups(
         restart_every=restart_every,
         min_lr_ratio=min_lr_ratio,
         adjust_step=adjust_step,
-    )
+    ) # 返回一个学习率lambda函数
     return LambdaLR(optimizer, lr_lambda, last_epoch)
 
 
@@ -189,14 +189,14 @@ def _get_cyclical_cosine_schedule_with_min_lr_lambda(current_step, *, num_warmup
 
 
 def _get_cosine_schedule_with_multiple_warmups_lambda(
-    current_step,
+    current_step, # 输入当前训练步数 返回一个学习率
     *,
-    num_training_steps,
-    first_warmup_steps,
-    restart_warmup_steps,
-    restart_every,
-    min_lr_ratio,
-    adjust_step,
+    num_training_steps, # 总训练步数
+    first_warmup_steps, # 第一次预热步数
+    restart_warmup_steps, # 重启时的预热步数
+    restart_every, # 重启周期
+    min_lr_ratio, # 最小学习率与初始学习率的比值
+    adjust_step, # 调整步数
 ):
     """
     Args:
@@ -210,30 +210,34 @@ def _get_cosine_schedule_with_multiple_warmups_lambda(
     assert adjust_step + first_warmup_steps <= num_training_steps, "warmup + adjust_step is more than full training steps"
     assert adjust_step + first_warmup_steps <= restart_every, "the first reset will happen before the warmup is done"
 
-    if current_step < first_warmup_steps:
+    if current_step < first_warmup_steps: # 在第一次warmup中
         return float(current_step) / float(max(1, first_warmup_steps))
 
-    _current_step = current_step + adjust_step
+    _current_step = current_step + adjust_step # 调整步数
 
-    restart_step = _current_step % restart_every
-    restart_number = _current_step // restart_every
+    restart_step = _current_step % restart_every # 计算当前步数在当前重启周期中的位置 %取余
+    # 如果等于0 则说明是重启周期的开始
+    restart_number = _current_step // restart_every # 计算当前步数在当前重启周期中的序号 //取商的整除部分
 
-    if restart_step < restart_warmup_steps and current_step >= restart_every:
+    if restart_step < restart_warmup_steps and current_step >= restart_every: # 进入重启warmup中
         # get expected lr multipler at the end of the warmup
         end_of_warmup_progress = (
             float(restart_number * restart_every + restart_warmup_steps - first_warmup_steps) /
-            float(max(1, num_training_steps - first_warmup_steps))
+            float(max(1, num_training_steps - first_warmup_steps)) # 计算当前重启周期在整个训练过程中的相对位置 即计算当前重启周期在cos函数中的相对位置
         )
 
-        _cosine_decay = 0.5 * (1.0 + math.cos(math.pi * end_of_warmup_progress))
-        warmup_lr_multiplier = min_lr_ratio + (1.0 - min_lr_ratio) * _cosine_decay
-    
-        return float(restart_step) / float(max(1, restart_warmup_steps)) * warmup_lr_multiplier
+        _cosine_decay = 0.5 * (1.0 + math.cos(math.pi * end_of_warmup_progress)) # 计算end of the warmup处的余弦衰减
+        warmup_lr_multiplier = min_lr_ratio + (1.0 - min_lr_ratio) * _cosine_decay # 计算预热结束时的学习率乘数
+        # 这行的目的是把计算的_cosine_decay(范围在0到1)映射到min_lr_ratio到1之间，再加上min_lr_ratio
 
-    progress = float(_current_step - first_warmup_steps) / float(max(1, num_training_steps - first_warmup_steps))
-    cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return float(restart_step) / float(max(1, restart_warmup_steps)) * warmup_lr_multiplier 
+        # 返回当前步数在预热周期中的学习率乘数 若restart_step等于0，则返回0 即lr置0.
 
-    return min_lr_ratio + (1.0 - min_lr_ratio) * cosine_decay
+    progress = float(_current_step - first_warmup_steps) / float(max(1, num_training_steps - first_warmup_steps)) 
+    # 计算当前步数在训练周期中的相对位置 以计算cos值
+    cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress)) # 计算余弦衰减
+
+    return min_lr_ratio + (1.0 - min_lr_ratio) * cosine_decay # 返回当前步数在训练周期中的学习率乘数 用这个乘数乘以初始学习率
 
 
 def max_train_tokens_to_number(max_train_tokens):
@@ -265,13 +269,13 @@ def get_last_training_state(save_dir):
 
 
 def optimizer_reset(
-    optimizer,
+    optimizer, # 优化器
     *,
-    reset_params: list[torch.nn.Parameter],
-    optimizer_state_keys: list[str],
-    reset_optimizer_on_relora: bool,
-    optimizer_random_pruning: float,
-    optimizer_magnitude_pruning: float,
+    reset_params: list[torch.nn.Parameter], # 需要重置的参数
+    optimizer_state_keys: list[str], # 优化器状态的key
+    reset_optimizer_on_relora: bool, # 是否在relora重置优化器
+    optimizer_random_pruning: float, # 随机剪枝的比例
+    optimizer_magnitude_pruning: float, # 按比例剪枝的比例
 ):
     """
         optimizer_state_keys: e.g., ["exp_avg", "exp_avg_sq"]

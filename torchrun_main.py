@@ -55,16 +55,16 @@ from peft_pretraining.megatron_dataset import data_utils as megatron_data_utils
 transformers.logging.set_verbosity_error()
 
 
-def parse_args(args=None): # 用argparse库定义了一堆命令行参数
+def parse_args(args=None): # 用argparse库定义了一些命令行参数
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--training_config", type=str, default=None,
                         help="Alternative to providing the parameters. Overrides all parameters. Path to a yaml file with training run config")
 
-    parser.add_argument("--model_config", type=str, default=None)
+    parser.add_argument("--model_config", type=str, default=None) # 模型配置文件路径
     parser.add_argument("--model_name_or_path", type=str, default=None, help="Huggingface model identifier, alternative to --model_config")
     parser.add_argument("--model_revision", type=str, default=None, help="Tag name, branch name, or commit hash of the model from HuggingFace Hub. E.g., v2.0.1 or step1000")
-    parser.add_argument("--warmed_up_model", type=str, default=None, help="Start with warmed-up model weights. Does not restore optimizer and scheduler.")
+    parser.add_argument("--warmed_up_model", type=str, default=None, help="Start with warmed-up model weights. Does not reload former optimizer and scheduler.")
     parser.add_argument("--resume_from", type=str, default=None, help="Continue training with ReLoRA, loading optimizer and scheduler from the checkpoint.")
     parser.add_argument("--load_optimizer_state_on_resume", default=True, type=lambda x: x.lower() == "true",
                         help="Load optimizer state from the checkpoint when resuming training. "
@@ -73,13 +73,13 @@ def parse_args(args=None): # 用argparse库定义了一堆命令行参数
     parser.add_argument("--dataset_path", type=str, default=None, help="Path to a huggingface dataset directory")
     parser.add_argument("--megatron_dataset_config", type=str, default=None,
                         help="Path to a megatron dataset config file. Only one of --dataset_path and --megatron_dataset_config should be provided.")
-    parser.add_argument("--max_length", type=int, default=512)
+    parser.add_argument("--max_length", type=int, default=512) # 一个序列的最大长度
 
-    parser.add_argument("--batch_size", type=int, default=None)
-    parser.add_argument("--gradient_accumulation", type=int, default=None)
-    parser.add_argument("--total_batch_size", type=int, default=None)
+    parser.add_argument("--batch_size", type=int, default=None) # 每个GPU上处理的批量大小
+    parser.add_argument("--gradient_accumulation", type=int, default=None) # 梯度累积的个数
+    parser.add_argument("--total_batch_size", type=int, default=None) # 所有GPU上的总批量大小
 
-    parser.add_argument("--use_peft", default=False, type=lambda x: x.lower() == "true")
+    parser.add_argument("--use_peft", default=False, type=lambda x: x.lower() == "true") # 是否使用peft 即是否使用lora或relora
     parser.add_argument("--lora_r", type=int, default=128)
     parser.add_argument("--lora_alpha", type=float, default=32)
     parser.add_argument("--relora", type=int, default=None)
@@ -101,7 +101,7 @@ def parse_args(args=None): # 用argparse库定义了一堆命令行参数
     parser.add_argument("--adjust_step", type=int, default=0, help="Number of steps to adjust the scheduler by. "
                             f"Useful when you want to sync ReLoRA resets with the scheduler for a warmed up model. "
                             f"You need to use it, when your warmup_step % relora_resets != 0")
-    parser.add_argument("--min_lr_ratio", type=float, default=0.1)
+    parser.add_argument("--min_lr_ratio", type=float, default=0.1) # 最小学习率与初始学习率的比值
     parser.add_argument("--adam_beta1", type=float, default=0.9)
     parser.add_argument("--adam_beta2", type=float, default=0.999)
     parser.add_argument("--weight_decay", type=float, default=0.0)
@@ -116,16 +116,16 @@ def parse_args(args=None): # 用argparse库定义了一堆命令行参数
     parser.add_argument("--max_train_tokens", type=training_utils.max_train_tokens_to_number, default=None,
                         help="Number of tokens to train on. Overwrites num_training_steps. "
                              "You can use M and B suffixes, e.g. 100M or 1B.")
-    parser.add_argument("--save_every", type=int, default=10_000)
-    parser.add_argument("--save_dir", type=str, default=None)
+    parser.add_argument("--save_every", type=int, default=10_000) # 保存频率
+    parser.add_argument("--save_dir", type=str, default=None) # 保存目录
     parser.add_argument("--keep_checkpoints", type=int, default=None,
                         help="Number of checkpoints to keep. By default, keep all checkpoints.")
     parser.add_argument("--tags", type=str, default=None)
     parser.add_argument("--dtype", type=str, default="bfloat16" if torch.cuda.is_bf16_supported() else "float32")
     parser.add_argument("--workers", type=int, default=8)
 
-    parser.add_argument("--quantize", default=None, type=str, choices=[None, "4bit", "8bit"])
-    parser.add_argument("--use_double_quant", default=True, type=lambda x: x.lower() == "true")
+    # parser.add_argument("--quantize", default=None, type=str, choices=[None, "4bit", "8bit"])
+    # parser.add_argument("--use_double_quant", default=True, type=lambda x: x.lower() == "true")
 
     parser.add_argument("--distributed_type", type=str, default="ddp", choices=["fsdp", "ddp"])
     parser.add_argument("--profile", default=False, type=lambda x: x.lower() == "true")
@@ -148,11 +148,11 @@ def parse_args(args=None): # 用argparse库定义了一堆命令行参数
 
 def evaluate_model(model: nn.Module, eval_dataloader, device, target_eval_tokens=10_000_000):
     _time = time.time()
-    was_training = model.train
+    was_training = model.training # 记录模型是否在训练模式
     model.eval() # 将模型设置为评估模式，这会关闭 dropout和 batch normalization等仅在训练时使用的层
 
     """
-    初始化一个用于 累积损失和 统计信息的张量
+    初始化一个于 累积损失和 统计信息的张量
     tensor可以在GPU上加速 而list只能在CPU上运行
     """
     ddp_loss_info = torch.zeros(3).to(device)  # [loss, n_batches, n_tokens] 这并不是list, 而是一个PyTorch tensor
@@ -199,40 +199,46 @@ def evaluate_model(model: nn.Module, eval_dataloader, device, target_eval_tokens
 
 # 保存模型 save_model_ddp和 save_model_fsdp函数用于在分布式数据并行（DDP）和全参数分片数据并行（FSDP）设置中保存模型
 # Distributed Data Parallel DDP
-def save_model_ddp(model, optimizer, scheduler, training_state_checkpoint, run_config, save_dir): # 分布式数据并行(DDP)下保存
-    global_rank = dist.get_rank()
-    _time = time.time()
+def save_model_ddp(model, optimizer, scheduler, training_state_checkpoint, run_config, save_dir):
+    # 检查模型是否被 DDP 包装
+    if hasattr(model, 'module'):
+        _model = model.module  # 获取DDP包装器内部的原始模型
+    else:
+        _model = model  # 如果没有被包装，直接使用模型
 
-    if global_rank == 0:
-        update_step = training_state_checkpoint["update_step"]
-        os.makedirs(os.path.dirname(save_dir), exist_ok=True)
+    # 保存模型
+    _model.save_pretrained(save_dir)
 
-        _model = model.module # 获取DDP包装器内部的原始模型
-        _model.save_pretrained(save_dir) # 保存
+    # 保存优化器状态
+    if optimizer is not None:
+        torch.save(optimizer.state_dict(), os.path.join(save_dir, "optimizer.pt"))
 
-    dist.barrier()
-    if isinstance(optimizer, ZeroRedundancyOptimizer):
-        logger.info("Started consolidating optimizer state dict")
-        optimizer.consolidate_state_dict() # 整合分布式存储的优化器状态
-        logger.info(f"Consolidating optimizer state dict took {time.time() - _time:.2f} seconds") # 
+    # 保存调度器状态
+    if scheduler is not None:
+        torch.save(scheduler.state_dict(), os.path.join(save_dir, "scheduler.pt"))
 
-    if global_rank == 0:
-        optimizer_checkpoint = { # checkpoint检查点 有点像保存断点状态 下次可以从断点处恢复训练
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
-            "update_step": update_step,
-            "global_step": training_state_checkpoint["global_step"],
-            "config": run_config,
-            "dtype": args.dtype,
-        }
-        torch.save(optimizer_checkpoint, f"{save_dir}/optimizer.pt")
+    # 保存训练状态
+    if training_state_checkpoint is not None:
+        torch.save(training_state_checkpoint, os.path.join(save_dir, "training_state.pt"))
 
-        training_state_checkpoint["wandb_id"] = wandb.run.id
-        with open(f"{save_dir}/training_state.json", "w") as f:
-            json.dump(training_state_checkpoint, f, indent=4) # 将训练状态写入一个JSON文件，以便可以从中断的地方恢复训练
+    # 保存运行配置
+    if run_config is not None:
+        # 将 run_config 中的 set 转换为 list
+        def set_to_list(obj):
+            if isinstance(obj, set):
+                return list(obj)
+            elif isinstance(obj, dict):
+                return {k: set_to_list(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [set_to_list(v) for v in obj]
+            else:
+                return obj
 
-    logger.info(f"Saving took {time.time() - _time:.2f} seconds") # 记录保存花费的时间
-    dist.barrier() # 确保所有的进程在继续执行之前都已经完成了模型和状态的保存
+        serializable_run_config = set_to_list(run_config)
+        with open(os.path.join(save_dir, "run_config.json"), "w") as f:
+            json.dump(serializable_run_config, f, indent=2)
+
+    logger.info(f"Model and associated states successfully saved to {save_dir}")
 
 # Fully Sharded Data Parallel FSDP
 # FSDP通过将模型参数分片到各个GPU上，可以有效地减少每个GPU上的内存占用，这对于大型模型特别有用。DDP则通常在每个GPU上保存完整的模型参数
@@ -359,18 +365,18 @@ def main(args): # args = parse_args()
     random.seed(args.seed)
 
     # 获取环境变量和分布式环境初始化
-    assert "LOCAL_RANK" in os.environ, "torchrun should set LOCAL_RANK"
-    global_rank = int(os.environ['RANK'])
-    local_rank = int(os.environ["LOCAL_RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
-    torch.cuda.set_device(local_rank)
+    assert "LOCAL_RANK" in os.environ, "torchrun应该设置LOCAL_RANK环境变量"
+    global_rank = int(os.environ['RANK'])  # global_rank是进程在全局范围内的唯一标识符(秩)
+    local_rank = int(os.environ["LOCAL_RANK"])  # local_rank是进程在当前节点上的局部标识符
+    world_size = int(os.environ["WORLD_SIZE"])  # world_size是总进程数
+    torch.cuda.set_device(local_rank)  # 设置当前进程使用的GPU设备
 
     logger.info(f"Global rank {global_rank}, local rank {local_rank}, device: {torch.cuda.current_device()}")
 
     dist.init_process_group(backend="nccl", rank=global_rank, world_size=world_size)
 
     logger.info("Process group initialized")
-    device = f"cuda:{local_rank}"
+    device = f"cuda:{local_rank}" # 指定device为 cuda:local_rank 即 GPU:local_rank
 
     if args.total_batch_size is not None:
         if args.gradient_accumulation is None:
@@ -447,7 +453,7 @@ def main(args): # args = parse_args()
         logger.info(f"{k:30} {v}")
     logger.info("*" * 40)
 
-    if args.dataset_path is not None:
+    if args.dataset_path is not None: # 加载huggingface数据集
         logger.info("Loading Huggingface dataset from directory")
         dataset_dict = datasets.load_from_disk(args.dataset_path)
         logger.info(f"Applying set_format")
@@ -464,7 +470,7 @@ def main(args): # args = parse_args()
         # Verify dataset
         logger.info("Checking datasets size")
         minimum_n_tokens = args.total_batch_size * args.num_training_steps
-        dataset_n_tokens = len(train_dataset) * args.max_length
+        dataset_n_tokens = len(train_dataset) * args.max_length # 计算数据集的token数
         if dataset_n_tokens < minimum_n_tokens:
             raise ValueError(f"Dataset only has {dataset_n_tokens} tokens, but we need at least {minimum_n_tokens}")
 
@@ -480,7 +486,7 @@ def main(args): # args = parse_args()
         )
         logger.info("Tokenizer loaded")
 
-    elif args.megatron_dataset_config is not None:
+    elif args.megatron_dataset_config is not None: # 加载megatron数据集
         # NOTE: load_megatron_dataset can modify args inplace
         # NOTE: train_dataset and eval_dataset do not exist in this if-branch
         # NOTE: we will set iteration to non-zero below in .resume_from
@@ -495,7 +501,7 @@ def main(args): # args = parse_args()
 
     # 模型初始化
     if args.model_config is not None:
-        model_config = AutoConfig.from_pretrained(args.model_config)
+        model_config = AutoConfig.from_pretrained(args.model_config) # 从模型配置文件中加载模型配置 而不是模型本身
         t_vocab_size = tokenizer.get_vocab_size() if isinstance(tokenizer, Tokenizer) else tokenizer.vocab_size
 
         if model_config.vocab_size != t_vocab_size:
@@ -509,28 +515,40 @@ def main(args): # args = parse_args()
             raise NotImplementedError(f"Unknown model config type {type(model_config)}, only LLaMA is supported")
 
         logger.info("Using local version of LLaMA")
-        model = LlamaForCausalLM(model_config)
+        model = LlamaForCausalLM(model_config) # 使用模型配置创建一个新的模型
     else:
         logger.info(f"Using HuggingFace model {args.model_name_or_path} revision {args.model_revision}")
         model = GPTNeoXForCausalLM.from_pretrained(args.model_name_or_path, revision=args.model_revision)
-        model_config = model.config
+        model_config = _model.config
 
-    global_step = 0
-    update_step = 0
-    tokens_seen = 0
-    tokens_seen_before = 0
-    n_lora_restarts = 0
-    n_optimizer_resets = 0
+    global_step = 0 # 模型已经处理的总batch数 只要处理了一个batch就+1 不考虑是否进行了参数更新
+    update_step = 0 # 模型参数已经更新的次数 进行了一次参数更新就+1。在有梯度累积的时候，处理多个batch才更新一次参数，所以global_step>update_step
+    tokens_seen = 0 # 已见token数
+    tokens_seen_before = 0 # 已见token数(前一个epoch)
+    n_lora_restarts = 0 # LoRA重启次数
+    n_optimizer_resets = 0 # 优化器重启次数
 
+    """加载预训练模型和训练状态，也就是加载checkpoint"""
     if args.warmed_up_model is not None:
         logger.info("*" * 40)
         logger.info(f"Loading a warmed-up model from {args.warmed_up_model}")
-        checkpoint_path = os.path.join(args.warmed_up_model, "pytorch_model.bin")  # !! won't work with sharded models
-        model.load_state_dict(torch.load(checkpoint_path, map_location="cpu"), strict=True)
-        logger.info(f"Model successfully loaded (strict=True policy)")
+        
+        # 使用 from_pretrained 方法加载模型
+        model = AutoModelForCausalLM.from_pretrained(args.warmed_up_model)
+        logger.info(f"Model successfully loaded")
 
+        # 检查 pad_token_id 是否正确设置
+        if model.config.pad_token_id is None or model.config.pad_token_id == -1:
+            logger.warning("pad_token_id is not set in the model config. This might cause issues during training or generation.")
+
+        # 检查 generation_config 中的 pad_token_id（如果存在）
+        if hasattr(model, 'generation_config'):
+            if model.generation_config.pad_token_id is None or model.generation_config.pad_token_id == -1:
+                logger.warning("pad_token_id is not set in the generation_config. This might cause issues during text generation.")
+
+        # 加载训练状态（如果存在）
         if os.path.exists(os.path.join(args.warmed_up_model, "training_state.json")):
-            logger.info(f"Loading training state variables like global_step, update_step, and tokens_seen from {args.warmed_up_model} (not optimizer state)")
+            logger.info(f"Loading training state variables from {args.warmed_up_model}")
             with open(os.path.join(args.warmed_up_model, "training_state.json")) as f:
                 _old_state = json.load(f)
             global_step = _old_state["global_step"]
@@ -569,40 +587,62 @@ def main(args): # args = parse_args()
             trainable_scaling=args.train_scaling,
             keep_original_weights=True,
             lora_only=not need_linear_weight,
-            quantize=args.quantize,
-            use_double_quant=args.use_double_quant,
+            # quantize=args.quantize,
+            # use_double_quant=args.use_double_quant,
         )
 
-    # 加载pre-trained model和训练状态
+    # 加载checkpoint 从checkpoint中恢复模型和训练状态
     if args.resume_from:
+        # 从指定路径加载模型
         logger.info(f"Loading model from {args.resume_from}")
-        checkpoint_path = os.path.join(args.resume_from, "pytorch_model.bin")
         if isinstance(model, ReLoRaModel):
-            model.wrapped_model.load_state_dict(torch.load(checkpoint_path, map_location="cpu"), strict=True)
+            # 如果是ReLoRaModel,只加载包装的模型
+            model.wrapped_model = AutoModelForCausalLM.from_pretrained(args.resume_from)
         else:
-            model.load_state_dict(torch.load(checkpoint_path, map_location="cpu"), strict=True)
+            # 否则直接加载整个模型
+            model = AutoModelForCausalLM.from_pretrained(args.resume_from)
 
-        logger.info(f"Model successfully loaded (strict=True policy)")
+        logger.info(f"Model successfully loaded")
 
+        # 加载训练状态信息
         logger.info(f"Loading training state like global_step, update_step, and tokens_seen from {args.resume_from}")
-        with open(os.path.join(args.resume_from, "training_state.json")) as f:
-            _old_state = json.load(f)
+        training_state_path = os.path.join(args.resume_from, "training_state.json")
+        if os.path.exists(training_state_path):
+            # 如果存在训练状态文件,读取相关信息
+            with open(training_state_path) as f:
+                _old_state = json.load(f)
 
-        global_step = _old_state["global_step"]
-        # We do overwrite update_step here to correctly initialize the scheduler
-        # which should start from warmed_up_model's update step or zero
-        _update_step = _old_state["update_step"]
-        tokens_seen = _old_state["tokens_seen"]
-        tokens_seen_before = _old_state["tokens_seen_before"]
-        n_lora_restarts = _old_state["n_lora_restarts"]
-        logger.info(f"global_step       : {global_step}")
-        logger.info(f"update_step       : {update_step}")
-        logger.info(f"tokens_seen       : {tokens_seen}")
-        logger.info(f"tokens_seen_before: {tokens_seen_before}")
-        logger.info(f"Will train for {args.num_training_steps - _update_step} update steps")
+            global_step = _old_state["global_step"]
+            # 重写update_step以正确初始化调度器
+            _update_step = _old_state["update_step"]
+            tokens_seen = _old_state["tokens_seen"]
+            tokens_seen_before = _old_state["tokens_seen_before"]
+            n_lora_restarts = _old_state.get("n_lora_restarts", 0)
+            # 打印加载的训练状态信息
+            logger.info(f"global_step       : {global_step}")
+            logger.info(f"update_step       : {_update_step}")
+            logger.info(f"tokens_seen       : {tokens_seen}")
+            logger.info(f"tokens_seen_before: {tokens_seen_before}")
+            logger.info(f"n_lora_restarts   : {n_lora_restarts}")
+            logger.info(f"Will train for {args.num_training_steps - _update_step} update steps")
 
-        if args.megatron_dataset_config is not None:
-            train_loader.batch_sampler.start_iter = global_step
+            # 如果使用megatron数据集,设置batch_sampler的起始迭代
+            if args.megatron_dataset_config is not None:
+                train_loader.batch_sampler.start_iter = global_step
+        else:
+            # 如果训练状态文件不存在,记录警告
+            logger.warning(f"Training state file not found at {training_state_path}. Starting from scratch.")
+
+        # 检查并设置pad_token_id
+        if model.config.pad_token_id is None or model.config.pad_token_id == -1:
+            logger.warning("pad_token_id is not set in the model config. Setting it to eos_token_id.")
+            model.config.pad_token_id = model.config.eos_token_id
+
+        # 检查并设置generation_config中的pad_token_id
+        if hasattr(model, 'generation_config'):
+            if model.generation_config.pad_token_id is None or model.generation_config.pad_token_id == -1:
+                logger.warning("pad_token_id is not set in the generation_config. Setting it to config.pad_token_id.")
+                model.generation_config.pad_token_id = model.config.pad_token_id
 
     params_after = sum(p.numel() for p in model.parameters())
 
@@ -627,7 +667,7 @@ def main(args): # args = parse_args()
     p_trainable_params = n_trainable_params / n_total_params
 
     # ##############################
-    # Distributed wrapping 根据分布式类型(DDP or FSDP)分布式包装
+    # Distributed wrapping 根据分布式类型(DDP or FSDP)分布式包装模型
     if args.distributed_type == "fsdp":
         logger.info("Wrapping model with FSDP")
         raise RuntimeError("FSDP is not supported anymore. "
@@ -637,11 +677,32 @@ def main(args): # args = parse_args()
 
     elif args.distributed_type == "ddp":
         logger.info("Wrapping model with DDP")
-        model: Union[ReLoRaModel, LlamaForCausalLM] = torch.nn.parallel.DistributedDataParallel(
+        # 这部分代码是将模型包装成分布式数据并行(DistributedDataParallel, DDP)的形式
+        # DDP是PyTorch中用于数据并行训练的一种方法,可以在多个GPU或多台机器上并行训练模型
+        # 主要作用如下:
+        # 1. 自动同步不同进程间的梯度,实现数据并行
+        # 2. 优化通信,提高训练效率
+        # 3. 确保模型在所有进程中保持一致
+        
+        # 参数说明:
+        # model: 要包装的模型
+        # device_ids: 指定当前进程使用的GPU设备ID
+        # output_device: 指定输出结果的设备
+        model = torch.nn.parallel.DistributedDataParallel(
             model,
             device_ids=[local_rank],
             output_device=local_rank,
-        )
+        ) # 把model模型包装起来 仍叫model
+
+        _model = model.module 
+        # 这行代码的意思是:
+        # 当使用DistributedDataParallel (DDP)包装模型时,
+        # 我们需要通过.module属性来访问原始的模型对象。
+        # 这是因为DDP会在原始模型外部添加一层包装,
+        # 而.module可以让我们绕过这层包装,直接访问到原始模型。
+    else:
+        _model = model
+
     # ##############################
     if args.wandb_watch and global_rank == 0:
         _log_freq = 500
@@ -699,8 +760,9 @@ def main(args): # args = parse_args()
     else:
         raise ValueError(f"Optimizer {args.optimizer} not supported")
 
-    scheduler_start_step = update_step
-    _scheduler_steps = args.num_training_steps - scheduler_start_step
+    scheduler_start_step = update_step # 记录调度器开始迭代时的步数 如果是从头开始训练 则update_step等于0
+    # 如果从checkpoint恢复训练 则update_step不等于0 此时scheduler_start_step记录的是从checkpoint恢复前的最后一次参数更新时的步数
+    _scheduler_steps = args.num_training_steps - scheduler_start_step # 调度器需要迭代的步数
     logger.info(f"Scheduler will run for {_scheduler_steps} update steps")
     scheduler = training_utils.get_scheculer(
         optimizer=optimizer,
@@ -711,7 +773,7 @@ def main(args): # args = parse_args()
         cycle_length=args.cycle_length,
         restart_warmup_steps=args.restart_warmup_steps,
         adjust_step=args.adjust_step,
-    )
+    ) # 生成调度器
 
     if args.resume_from:
         logger.info("Setting scheduler to the same state as in the checkpoint")
@@ -724,8 +786,8 @@ def main(args): # args = parse_args()
         if args.load_optimizer_state_on_resume:
             _optimizer_dir = args.resume_from
             optimizer_checkpoint = torch.load(os.path.join(_optimizer_dir, "optimizer.pt"), map_location="cpu")
-            optimizer.load_state_dict(optimizer_checkpoint["optimizer"])
-            scheduler.load_state_dict(optimizer_checkpoint["scheduler"])
+            optimizer.load_state_dict(optimizer_checkpoint["optimizer"]) # 从checkpoint加载优化器状态
+            scheduler.load_state_dict(optimizer_checkpoint["scheduler"]) # 从checkpoint加载调度器状态
             update_step = optimizer_checkpoint["update_step"]
             global_step = optimizer_checkpoint["global_step"]
             logger.info(f"Optimizer and scheduler restored from {_optimizer_dir}")
@@ -775,10 +837,10 @@ def main(args): # args = parse_args()
     loss_info = torch.tensor([0.0, 0.0, 0.0], device=device)  # loss, n_batches, n_NaNs
     n_skipped_batches = 0
 
-    # ##############################
+    # ###########################################################################################################
     # TRAINING LOOP 包括 前向传播、损失计算、反向传播和参数更新
     # we assert above that the dataset is large enough to train for num_training_steps, so no need for epochs
-    # ##############################
+    # ###########################################################################################################
 
     prof = maybe_make_profiler(args)
 
@@ -806,7 +868,7 @@ def main(args): # args = parse_args()
         batch = {k: v.to(device) for k, v in batch.items()}
         tokens_seen += batch["input_ids"].numel() * world_size
 
-        loss = model(**batch, labels=batch["input_ids"]).loss # forward 并 计算loss
+        loss = model(**batch, labels=batch["input_ids"]).loss # forward 并 计算loss; model.loss
 
         loss_info[0] += loss.detach()
         loss_info[1] += 1
@@ -850,10 +912,22 @@ def main(args): # args = parse_args()
 
         loss_info = torch.zeros_like(loss_info)
 
-        # 保存model 和 训练状态
+        """保存model 和 训练状态 这是在training loop里的保存"""
         if local_step > args.gradient_accumulation and update_step % args.save_every == 0:
+            logger.info(f"Saving condition met: local_step={local_step}, args.gradient_accumulation={args.gradient_accumulation}, update_step={update_step}, args.save_every={args.save_every}")
             current_model_directory = f"{args.save_dir}/model_{update_step}"
             logger.info(f"Saving model and optimizer to {current_model_directory}, update step {update_step}")
+            
+            # 使用 _model 而不是 model
+            if _model.config.pad_token_id is None or _model.config.pad_token_id == -1:
+                logger.warning("pad_token_id is not set. Setting it to eos_token_id.")
+                _model.config.pad_token_id = _model.config.eos_token_id
+
+            if hasattr(_model, 'generation_config'):
+                if _model.generation_config.pad_token_id is None or _model.generation_config.pad_token_id == -1:
+                    logger.warning("generation_config.pad_token_id is not set. Setting it to config.pad_token_id.")
+                    _model.generation_config.pad_token_id = _model.config.pad_token_id
+
             training_state_checkpoint = {
                 "global_step": global_step,
                 "update_step": update_step,
@@ -863,8 +937,10 @@ def main(args): # args = parse_args()
                 "n_optimizer_resets": n_optimizer_resets,
                 "update_time": update_time,
             }
+
+            # 然后再保存模型 在training loop中
             save_model(
-                model,
+                _model, # 使用 _model 而不是 model
                 optimizer=optimizer,
                 scheduler=scheduler,
                 training_state_checkpoint=training_state_checkpoint,
@@ -874,6 +950,8 @@ def main(args): # args = parse_args()
             )
             if args.keep_checkpoints is not None:
                 training_utils.delete_old_checkpoints(args.save_dir, keep=args.keep_checkpoints)
+        # else:
+            # logger.info(f"Saving condition not met: local_step={local_step}, args.gradient_accumulation={args.gradient_accumulation}, update_step={update_step}, args.save_every={args.save_every}")
 
         # ##############################
         # EVALUATION
@@ -897,10 +975,10 @@ def main(args): # args = parse_args()
         # restart model after we modify the learning rate, so on the next step after the relora frequency
         can_reset_relora = args.relora is not None and (
             args.resume_from is not None
-            or local_step // args.gradient_accumulation >= args.relora
+            or local_step // args.gradient_accumulation >= args.relora # 如果当前步数除以梯度累积的个数大于等于relora 则可以进行lora重置
         )
 
-        if can_reset_relora and (update_step - scheduler_start_step) % args.relora == 1:
+        if can_reset_relora and (update_step - scheduler_start_step) % args.relora == 1: # 如果可以进行lora重置 并且是lora重置的第一个step
             _lora_reset_time = time.time()
             logger.info(f"{args.resume_from=}, {local_step=}, {args.relora=}, thresh: {local_step // args.gradient_accumulation}")
             logger.info(f"Performing lora reset at update step {update_step}. Current lr is {optimizer.param_groups[0]['lr']}")
@@ -921,7 +999,7 @@ def main(args): # args = parse_args()
             or local_step // args.gradient_accumulation >= args.cycle_length
         )
 
-        if can_reset_optimizer and (update_step - scheduler_start_step) % args.cycle_length == 1:
+        if can_reset_optimizer and (update_step - scheduler_start_step) % args.cycle_length == 1: # 如果可以进行优化器重置 并且是优化器重置的第一个step
             # scheduler should provide a new warmup after the reset
             logger.info(f"Performing optimizer reset at update step {update_step}. Current lr is {optimizer.param_groups[0]['lr']}")
             n_optimizer_resets += 1
@@ -936,13 +1014,13 @@ def main(args): # args = parse_args()
             )
         # ##############################
 
-        if can_reset_optimizer and (update_step - scheduler_start_step) % args.cycle_length == 2:
-            logger.info(f"First step after optimizer reset lr is {optimizer.param_groups[0]['lr']}")
+        if can_reset_optimizer and (update_step - scheduler_start_step) % args.cycle_length == 2: # 如果可以进行优化器重置 并且是优化器重置的第二个step
+            logger.info(f"First step after optimizer reset lr is {optimizer.param_groups[0]['lr']}") # 打印当前的学习率
 
-        lr = optimizer.param_groups[0]["lr"]
-        tokens_in_update = tokens_seen - tokens_seen_before
-        tokens_seen_before = tokens_seen
-        batches_in_update = args.gradient_accumulation * world_size
+        lr = optimizer.param_groups[0]["lr"] # 获取当前的学习率
+        tokens_in_update = tokens_seen - tokens_seen_before # 计算当前更新步数内的token数
+        tokens_seen_before = tokens_seen # 更新tokens_seen_before
+        batches_in_update = args.gradient_accumulation * world_size # 计算当前更新步数内的batch数
 
         if global_rank == 0:
             wandb.log({
@@ -971,15 +1049,25 @@ def main(args): # args = parse_args()
         logger.warning("Reached the end of the dataset. Training stopped")
 
     if prof is not None: prof.stop()
-    # ##############################
+    # ###########################################################################################################
     # END of training loop
-    # ##############################
+    # ###########################################################################################################
     logger.info("Training finished")
     if global_rank == 0: pbar.close()
 
+    """保存model 和 训练状态 这是在training loop外的保存"""
     current_model_directory = f"{args.save_dir}/model_{update_step}"
     if not os.path.exists(current_model_directory):
         logger.info(f"Saving model and optimizer to {current_model_directory}, update step {update_step}")
+        # 使用 _model 而不是 model
+        if _model.config.pad_token_id is None or _model.config.pad_token_id == -1:
+            logger.warning("pad_token_id is not set. Setting it to eos_token_id.")
+            _model.config.pad_token_id = _model.config.eos_token_id
+
+        if hasattr(_model, 'generation_config'):
+            if _model.generation_config.pad_token_id is None or _model.generation_config.pad_token_id == -1:
+                logger.warning("generation_config.pad_token_id is not set. Setting it to config.pad_token_id.")
+
         training_state_checkpoint = {
             "global_step": global_step,
             "update_step": update_step,
@@ -989,7 +1077,7 @@ def main(args): # args = parse_args()
             "update_time": update_time,
         }
         save_model(
-            model,
+            _model, # 使用 _model 而不是 model
             optimizer=optimizer,
             scheduler=scheduler,
             training_state_checkpoint=training_state_checkpoint,

@@ -8,6 +8,7 @@ from transformers import AutoTokenizer, default_data_collator
 from datasets import Dataset
 
 from loguru import logger
+import datetime
 
 
 class PreprocessedIterableDataset(IterableDataset):
@@ -78,6 +79,20 @@ def tokenize_and_chunk(
         extra_map_kwargs = {}
 
     _len_pre = len(dataset)
+
+    # 添加处理 datetime 对象的函数
+    def process_datetime(example):
+        for key, value in example.items():
+            if isinstance(value, datetime.datetime):
+                example[key] = value.isoformat()
+        return example
+
+    # 在tokenization之前处理 datetime 对象
+    dataset = dataset.map(process_datetime, **extra_map_kwargs)
+
+    columns_to_remove = ['timestamp', 'url']
+    dataset = dataset.remove_columns(columns_to_remove)
+    
     # check that text_field is in dataset
     tokenized_dataset = dataset.map(
         lambda example: tokenizer([t + tokenizer.eos_token for t in example[text_field]]),
@@ -96,9 +111,10 @@ def tokenize_and_chunk(
     # Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.
     def group_texts(examples):
         # Concatenate all texts.
-        concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
+        concatenated_examples = {k: list(chain(*examples[k])) for k in ['input_ids', 'attention_mask']}
+        total_length = len(concatenated_examples[list(concatenated_examples.keys())[0]])
 
-        total_length = len(concatenated_examples["input_ids"])
+        # total_length = len(concatenated_examples["input_ids"])
         # We drop the small remainder, we could add padding if the model supported it instead of this drop, you can
         # customize this part to your needs.
         if total_length >= block_size:
@@ -107,17 +123,25 @@ def tokenize_and_chunk(
         result = {
             k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
             for k, t in concatenated_examples.items()
-            if k != "attention_mask"  # we never pad for LM, so it's best to minimize the dataset storage
+            # if k != "attention_mask"  # we never pad for LM, so it's best to minimize the dataset storage
         }
         return result
 
-    remove_columns = ["attention_mask"]
+    # remove_columns = ["attention_mask"]
+    # train_dataset = tokenized_dataset.map(
+    #     group_texts,
+    #     batched=True,
+    #     remove_columns=remove_columns,
+    #     **extra_map_kwargs,
+    # )
+   
     train_dataset = tokenized_dataset.map(
         group_texts,
         batched=True,
-        remove_columns=remove_columns,
         **extra_map_kwargs,
     )
+   
+
     logger.info(f"Chunking finished")
     logger.info(f"\n{train_dataset}")
 
@@ -125,7 +149,7 @@ def tokenize_and_chunk(
 
 
 # from https://github.com/huggingface/accelerate/blob/8514c35192ac9762920f1ab052e5cea4c0e46eeb/src/accelerate/data_loader.py#L816
-class SkipBatchSampler(BatchSampler):
+class SkipBatchSampler(BatchSampler): 
     """
     A `torch.utils.data.BatchSampler` that skips the first `n` batches of another `torch.utils.data.BatchSampler`.
     """
